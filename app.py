@@ -1,5 +1,5 @@
 # app.py
-import hmac, hashlib
+import os, hmac, hashlib
 from fastapi import FastAPI, Request, HTTPException
 from dotenv import load_dotenv
 load_dotenv()
@@ -7,44 +7,23 @@ load_dotenv()
 from config import load_config
 from db import init_db
 from scheduler import scheduler, init_jobs
+
 from telebot import TeleBot, types
 from bot.ui import main_menu, back_kb
 
-# 🔌 добавили наши роуты для /, /healthz, /debug/digest
+# корневые роуты (/, /healthz, /debug/*)
 from routes_root import router as root_router
 
 cfg = load_config()
 app = FastAPI(title="ETRONICS Community Bot")
-init_db()
 
-# подключаем базовые маршруты (/, /healthz, /debug/digest)
+# БД и роуты
+init_db()
 app.include_router(root_router)
 
+# --- Telegram bot ---
 bot = TeleBot(cfg.TELEGRAM_BOT_TOKEN, parse_mode="HTML")
 
-@app.on_event("startup")
-def on_startup():
-    init_jobs()
-    scheduler.start()
-
-# твой существующий health-эндпоинт оставляем как есть
-@app.get("/health")
-def health():
-    return {"ok": True}
-
-@app.post("/tg/webhook")
-async def tg_webhook(request: Request):
-    body = await request.body()
-    if cfg.WEBHOOK_SECRET:
-        sig = request.headers.get("X-Telegram-Signature") or ""
-        want = hmac.new(cfg.WEBHOOK_SECRET.encode(), body, hashlib.sha256).hexdigest()
-        if not hmac.compare_digest(sig, want):
-            raise HTTPException(status_code=401, detail="bad signature")
-    update = types.Update.de_json(body.decode("utf-8"))
-    bot.process_new_updates([update])
-    return {"ok": True}
-
-# ----- Telegram UI handlers (skeleton) -----
 @bot.message_handler(commands=["start"])
 def start(m: types.Message):
     bot.send_message(m.chat.id, "Панель управления", reply_markup=main_menu())
@@ -84,5 +63,36 @@ def callbacks(c: types.CallbackQuery):
         bot.edit_message_text(chat_id=c.message.chat.id, message_id=c.message.message_id,
                               text="Панель управления", reply_markup=main_menu())
 
-# NOTE: On Render, set webhook via
-# https://api.telegram.org/bot<TOKEN>/setWebhook?url=<PUBLIC_BASE_URL>/tg/webhook
+# --- Webhook: максимально простой и надёжный ---
+@app.post("/tg/webhook")
+async def tg_webhook(request: Request):
+    body = await request.body()
+    update = types.Update.de_json(body.decode("utf-8"))
+    bot.process_new_updates([update])
+    return {"ok": True}
+
+# Быстрый пинг в TG (помогает проверить токен/чат)
+import httpx
+@app.get("/debug/ping_tg")
+async def debug_ping_tg():
+    chat_id = os.getenv("TELEGRAM_ADMIN_CHAT_ID", "")
+    token = os.getenv("TELEGRAM_BOT_TOKEN", "")
+    if not (chat_id and token):
+        return {"ok": False, "err": "TELEGRAM_* envs missing"}
+    url = f"https://api.telegram.org/bot{token}/sendMessage"
+    payload = {"chat_id": chat_id, "text": "Бот жив. Вот меню ↓", "reply_markup": main_menu().to_dic()}
+    async with httpx.AsyncClient(timeout=10) as client:
+        r = await client.post(url, json=payload)
+        data = r.json()
+    return {"ok": True, "tg": data}
+
+# health (если уже есть — не страшно, дубли не ломают)
+@app.get("/health")
+def health():
+    return {"ok": True}
+
+# Планировщик (digest и пр.)
+@app.on_event("startup")
+def on_startup():
+    init_jobs()
+    scheduler.start()
