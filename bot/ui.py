@@ -15,3 +15,12 @@ def back_kb(tag="back_main"):
     kb = InlineKeyboardMarkup()
     kb.row(InlineKeyboardButton("🔙 Назад", callback_data=tag))
     return kb
+
+# 👍 Меню для раздела «Анти-лайки»
+def likes_kb():
+    kb = InlineKeyboardMarkup()
+    kb.row(
+        InlineKeyboardButton("🔙 Назад", callback_data="back_main"),
+        InlineKeyboardButton("🔄 Анти-лайки сейчас", callback_data="run_anti_likes")
+    )
+    return kb
