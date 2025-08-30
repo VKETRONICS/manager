@@ -1,5 +1,5 @@
 # app.py
-import os, hmac, hashlib
+import os, hmac, hashlib, asyncio
 from fastapi import FastAPI, Request, HTTPException
 from dotenv import load_dotenv
 load_dotenv()
@@ -9,7 +9,8 @@ from db import init_db
 from scheduler import scheduler, init_jobs
 
 from telebot import TeleBot, types
-from bot.ui import main_menu, back_kb
+from bot.ui import main_menu, back_kb, likes_kb   # ✅ добавили likes_kb
+from modules.anti_likes import run_anti_likes_once  # ✅ для ручного запуска
 
 # корневые роуты (/, /healthz, /debug/*)
 from routes_root import router as root_router
@@ -41,8 +42,40 @@ def callbacks(c: types.CallbackQuery):
                               reply_markup=back_kb("back_main"))
     elif data == "likes":
         bot.edit_message_text(chat_id=c.message.chat.id, message_id=c.message.message_id,
-                              text="Анти-лайки: за сутки проверено 0 / удалено 0 / карантин 0",
-                              reply_markup=back_kb("back_main"))
+                              text="Анти-лайки: мониторинг включён.\n"
+                                   "Можешь запустить проверку вручную кнопкой ниже.",
+                              reply_markup=likes_kb())  # ✅ показываем меню с 2 кнопками
+    elif data == "run_anti_likes":
+        if str(c.from_user.id) != str(cfg.TELEGRAM_ADMIN_CHAT_ID):
+            bot.answer_callback_query(c.id, "Недостаточно прав", show_alert=True)
+        else:
+            bot.answer_callback_query(c.id)
+            bot.edit_message_text(chat_id=c.message.chat.id,
+                                  message_id=c.message.message_id,
+                                  text="🔄 Запускаю проверку лайков…",
+                                  reply_markup=back_kb("back_main"))
+            try:
+                result = asyncio.run(run_anti_likes_once())
+                if result.get("ok"):
+                    checked = result.get("checked", 0)
+                    banned = result.get("banned", 0)
+                    quarantine = result.get("quarantine", 0)
+                    posts = result.get("posts", 0)
+                    text = (f"👍 Готово.\n"
+                            f"Постов проверено: {posts}\n"
+                            f"Лайкеров проверено: {checked}\n"
+                            f"Удалено: {banned}\n"
+                            f"Карантин: {quarantine}\n\n"
+                            f"Режим: {'боевой' if os.getenv('ANTI_LIKES_BAN_ENABLED','false').lower()=='true' else 'dry-run'}")
+                else:
+                    text = f"⚠️ Ошибка: {result.get('error','unknown')}"
+            except Exception as e:
+                text = f"⚠️ Исключение при запуске: {e}"
+
+            bot.edit_message_text(chat_id=c.message.chat.id,
+                                  message_id=c.message.message_id,
+                                  text=text,
+                                  reply_markup=likes_kb())  # ✅ остаёмся в разделе «Анти-лайки»
     elif data == "comments":
         bot.edit_message_text(chat_id=c.message.chat.id, message_id=c.message.message_id,
                               text="Анти-комменты: за сутки проверено 0 / удалено 0 / карантин 0",
@@ -63,7 +96,7 @@ def callbacks(c: types.CallbackQuery):
         bot.edit_message_text(chat_id=c.message.chat.id, message_id=c.message.message_id,
                               text="Панель управления", reply_markup=main_menu())
 
-# --- Webhook: максимально простой и надёжный ---
+# --- Webhook ---
 @app.post("/tg/webhook")
 async def tg_webhook(request: Request):
     body = await request.body()
@@ -71,27 +104,12 @@ async def tg_webhook(request: Request):
     bot.process_new_updates([update])
     return {"ok": True}
 
-# Быстрый пинг в TG (помогает проверить токен/чат)
-import httpx
-@app.get("/debug/ping_tg")
-async def debug_ping_tg():
-    chat_id = os.getenv("TELEGRAM_ADMIN_CHAT_ID", "")
-    token = os.getenv("TELEGRAM_BOT_TOKEN", "")
-    if not (chat_id and token):
-        return {"ok": False, "err": "TELEGRAM_* envs missing"}
-    url = f"https://api.telegram.org/bot{token}/sendMessage"
-    payload = {"chat_id": chat_id, "text": "Бот жив. Вот меню ↓", "reply_markup": main_menu().to_dic()}
-    async with httpx.AsyncClient(timeout=10) as client:
-        r = await client.post(url, json=payload)
-        data = r.json()
-    return {"ok": True, "tg": data}
-
-# health (если уже есть — не страшно, дубли не ломают)
+# health (если уже есть — не страшно)
 @app.get("/health")
 def health():
     return {"ok": True}
 
-# Планировщик (digest и пр.)
+# Планировщик
 @app.on_event("startup")
 def on_startup():
     init_jobs()
