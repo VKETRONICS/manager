@@ -46,3 +46,17 @@ def debug_jobs():
         "now": datetime.utcnow().isoformat() + "Z",
         "jobs": jobs
     }
+# --- DEBUG: ручной запуск анти-лайков (постоянно, но под ключом) ---
+import os
+from fastapi import Query, HTTPException
+from modules.anti_likes import run_anti_likes_once
+
+DEBUG_KEY = os.getenv("DEBUG_ENDPOINT_KEY", "")
+
+@router.get("/debug/anti_likes", tags=["debug"])
+async def debug_anti_likes(k: str = Query(default="", description="secret key from DEBUG_ENDPOINT_KEY")):
+    # Проверяем секрет
+    if not DEBUG_KEY or k != DEBUG_KEY:
+        raise HTTPException(status_code=404, detail="Not found")
+    result = await run_anti_likes_once()
+    return {"ok": True, "result": result}
